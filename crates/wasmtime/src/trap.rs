@@ -2,6 +2,7 @@ use crate::store::StoreOpaque;
 use crate::Module;
 use anyhow::Error;
 use std::fmt;
+use std::sync::Arc;
 use wasmtime_environ::{EntityRef, FilePos, TrapCode};
 use wasmtime_jit::{demangle_function_name, demangle_function_name_or_index};
 
@@ -173,7 +174,7 @@ impl Trap {
         match backtrace {
             Some(bt) => {
                 let bt = WasmBacktrace::new(store, bt, pc);
-                if bt.wasm_trace.is_empty() {
+                if bt.frames().is_empty() {
                     error
                 } else {
                     error.context(bt)
@@ -276,8 +277,11 @@ impl std::error::Error for Trap {}
 /// # Ok(())
 /// # }
 /// ```
+#[derive(Debug, Clone)]
+pub struct WasmBacktrace(Arc<BacktraceInner>);
+
 #[derive(Debug)]
-pub struct WasmBacktrace {
+struct BacktraceInner {
     wasm_trace: Vec<FrameInfo>,
     hint_wasm_backtrace_details_env: bool,
     // This is currently only present for the `Debug` implementation for extra
@@ -356,17 +360,17 @@ impl WasmBacktrace {
             }
         }
 
-        Self {
+        Self(Arc::new(BacktraceInner {
             wasm_trace,
             runtime_trace,
             hint_wasm_backtrace_details_env,
-        }
+        }))
     }
 
     /// Returns a list of function frames in WebAssembly this backtrace
     /// represents.
     pub fn frames(&self) -> &[FrameInfo] {
-        self.wasm_trace.as_slice()
+        self.0.wasm_trace.as_slice()
     }
 }
 
@@ -375,7 +379,7 @@ impl fmt::Display for WasmBacktrace {
         writeln!(f, "error while executing at wasm backtrace:")?;
 
         let mut needs_newline = false;
-        for (i, frame) in self.wasm_trace.iter().enumerate() {
+        for (i, frame) in self.0.wasm_trace.iter().enumerate() {
             // Avoid putting a trailing newline on the output
             if needs_newline {
                 writeln!(f, "")?;
@@ -420,7 +424,7 @@ impl fmt::Display for WasmBacktrace {
                 }
             }
         }
-        if self.hint_wasm_backtrace_details_env {
+        if self.0.hint_wasm_backtrace_details_env {
             write!(f, "\nnote: using the `WASMTIME_BACKTRACE_DETAILS=1` environment variable to may show more debugging information")?;
         }
         Ok(())

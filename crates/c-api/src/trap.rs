@@ -1,7 +1,7 @@
 use crate::{wasm_frame_vec_t, wasm_instance_t, wasm_name_t, wasm_store_t};
 use anyhow::{anyhow, Error};
 use once_cell::unsync::OnceCell;
-use wasmtime::{BacktraceContext, Trap};
+use wasmtime::{Trap, WasmBacktrace};
 
 #[repr(C)]
 pub struct wasm_trap_t {
@@ -31,7 +31,7 @@ impl wasm_trap_t {
 #[repr(C)]
 #[derive(Clone)]
 pub struct wasm_frame_t {
-    trap: Trap,
+    backtrace: WasmBacktrace,
     idx: usize,
     func_name: OnceCell<Option<wasm_name_t>>,
     module_name: OnceCell<Option<wasm_name_t>>,
@@ -76,13 +76,13 @@ pub extern "C" fn wasm_trap_message(trap: &wasm_trap_t, out: &mut wasm_message_t
 
 #[no_mangle]
 pub extern "C" fn wasm_trap_origin(raw: &wasm_trap_t) -> Option<Box<wasm_frame_t>> {
-    let trap = match raw.error.downcast_ref::<BacktraceContext>() {
-        Some(trap) => trap,
+    let backtrace = match raw.error.downcast_ref::<WasmBacktrace>() {
+        Some(bt) => bt,
         None => return None,
     };
-    if trap.frames().len() > 0 {
+    if backtrace.frames().len() > 0 {
         Some(Box::new(wasm_frame_t {
-            trap: trap.clone(),
+            backtrace: backtrace.clone(),
             idx: 0,
             func_name: OnceCell::new(),
             module_name: OnceCell::new(),
@@ -94,14 +94,14 @@ pub extern "C" fn wasm_trap_origin(raw: &wasm_trap_t) -> Option<Box<wasm_frame_t
 
 #[no_mangle]
 pub extern "C" fn wasm_trap_trace(raw: &wasm_trap_t, out: &mut wasm_frame_vec_t) {
-    let trap = match raw.error.downcast_ref::<Trap>() {
-        Some(trap) => trap,
+    let backtrace = match raw.error.downcast_ref::<WasmBacktrace>() {
+        Some(bt) => bt,
         None => return out.set_buffer(Vec::new()),
     };
-    let vec = (0..trap.trace().unwrap_or(&[]).len())
+    let vec = (0..backtrace.frames().len())
         .map(|idx| {
             Some(Box::new(wasm_frame_t {
-                trap: trap.clone(),
+                backtrace: backtrace.clone(),
                 idx,
                 func_name: OnceCell::new(),
                 module_name: OnceCell::new(),
@@ -147,7 +147,7 @@ pub extern "C" fn wasmtime_trap_exit_status(raw: &wasm_trap_t, status: &mut i32)
 
 #[no_mangle]
 pub extern "C" fn wasm_frame_func_index(frame: &wasm_frame_t) -> u32 {
-    frame.trap.trace().expect("backtraces are always enabled")[frame.idx].func_index()
+    frame.backtrace.frames()[frame.idx].func_index()
 }
 
 #[no_mangle]
@@ -155,7 +155,7 @@ pub extern "C" fn wasmtime_frame_func_name(frame: &wasm_frame_t) -> Option<&wasm
     frame
         .func_name
         .get_or_init(|| {
-            frame.trap.trace().expect("backtraces are always enabled")[frame.idx]
+            frame.backtrace.frames()[frame.idx]
                 .func_name()
                 .map(|s| wasm_name_t::from(s.to_string().into_bytes()))
         })
@@ -167,7 +167,7 @@ pub extern "C" fn wasmtime_frame_module_name(frame: &wasm_frame_t) -> Option<&wa
     frame
         .module_name
         .get_or_init(|| {
-            frame.trap.trace().expect("backtraces are always enabled")[frame.idx]
+            frame.backtrace.frames()[frame.idx]
                 .module_name()
                 .map(|s| wasm_name_t::from(s.to_string().into_bytes()))
         })
@@ -176,7 +176,7 @@ pub extern "C" fn wasmtime_frame_module_name(frame: &wasm_frame_t) -> Option<&wa
 
 #[no_mangle]
 pub extern "C" fn wasm_frame_func_offset(frame: &wasm_frame_t) -> usize {
-    frame.trap.trace().expect("backtraces are always enabled")[frame.idx]
+    frame.backtrace.frames()[frame.idx]
         .func_offset()
         .unwrap_or(usize::MAX)
 }
@@ -188,7 +188,7 @@ pub extern "C" fn wasm_frame_instance(_arg1: *const wasm_frame_t) -> *mut wasm_i
 
 #[no_mangle]
 pub extern "C" fn wasm_frame_module_offset(frame: &wasm_frame_t) -> usize {
-    frame.trap.trace().expect("backtraces are always enabled")[frame.idx]
+    frame.backtrace.frames()[frame.idx]
         .module_offset()
         .unwrap_or(usize::MAX)
 }
