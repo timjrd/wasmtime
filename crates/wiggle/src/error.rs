@@ -19,14 +19,6 @@ pub enum GuestError {
     BorrowCheckerOutOfHandles,
     #[error("Slice length mismatch")]
     SliceLengthsDiffer,
-    #[error("In func {modulename}::{funcname} at {location}: {err}")]
-    InFunc {
-        modulename: &'static str,
-        funcname: &'static str,
-        location: &'static str,
-        #[source]
-        err: Box<GuestError>,
-    },
     #[error("Invalid UTF-8 encountered: {0:?}")]
     InvalidUtf8(#[from] ::std::str::Utf8Error),
     #[error("Int conversion error: {0:?}")]

@@ -193,25 +193,15 @@ impl witx::Bindgen for Rust<'_> {
         results: &mut Vec<TokenStream>,
     ) {
         let rt = self.rt;
-        let wrap_err = |location: &str| {
-            let modulename = self.module.name.as_str();
-            let funcname = self.funcname;
-            quote! {
-                |e| {
-                    #rt::GuestError::InFunc {
-                        modulename: #modulename,
-                        funcname: #funcname,
-                        location: #location,
-                        err: Box::new(#rt::GuestError::from(e)),
-                    }
-                }
-            }
-        };
-
         let mut try_from = |ty: TokenStream| {
             let val = operands.pop().unwrap();
-            let wrap_err = wrap_err(&format!("convert {}", ty));
-            results.push(quote!(#ty::try_from(#val).map_err(#wrap_err)?));
+            let ctx = format!(
+                "in {}:{} converting {}",
+                self.module.name.as_str(),
+                self.funcname,
+                ty
+            );
+            results.push(quote!(anyhow::Context::context(#ty::try_from(#val), #ctx)?));
         };
 
         match inst {
@@ -355,23 +345,23 @@ impl witx::Bindgen for Rust<'_> {
             Instruction::Store { ty } => {
                 let ptr = operands.pop().unwrap();
                 let val = operands.pop().unwrap();
-                let wrap_err = wrap_err(&format!("write {}", ty.name.as_str()));
+                let ctx = format!("write {}", ty.name.as_str());
                 let pointee_type = self.names.type_(&ty.name);
                 self.src.extend(quote! {
-                    #rt::GuestPtr::<#pointee_type>::new(memory, #ptr as u32)
-                        .write(#val)
-                        .map_err(#wrap_err)?;
+                    anyhow::Context::context(
+                        #rt::GuestPtr::<#pointee_type>::new(memory, #ptr as u32).write(#val),
+                        #ctx)?;
                 });
             }
 
             Instruction::Load { ty } => {
                 let ptr = operands.pop().unwrap();
-                let wrap_err = wrap_err(&format!("read {}", ty.name.as_str()));
+                let ctx = format!("write {}", ty.name.as_str());
                 let pointee_type = self.names.type_(&ty.name);
                 results.push(quote! {
-                    #rt::GuestPtr::<#pointee_type>::new(memory, #ptr as u32)
-                        .read()
-                        .map_err(#wrap_err)?
+                    anyhow::Context::context(
+                        #rt::GuestPtr::<#pointee_type>::new(memory, #ptr as u32).read(),
+                        #ctx)?;
                 });
             }
 
