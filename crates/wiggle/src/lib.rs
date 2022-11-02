@@ -1,4 +1,3 @@
-use anyhow::{bail, Result};
 use std::fmt;
 use std::slice;
 use std::str;
@@ -21,7 +20,7 @@ mod region;
 
 pub extern crate tracing;
 
-pub use error::GuestError;
+pub use error::{Error, GuestError};
 pub use guest_type::{GuestErrorType, GuestType, GuestTypeTransparent};
 pub use region::Region;
 
@@ -910,7 +909,7 @@ impl Pointee for str {
     }
 }
 
-pub fn run_in_dummy_executor<F: std::future::Future>(future: F) -> Result<F::Output> {
+pub fn run_in_dummy_executor<F: std::future::Future>(future: F) -> anyhow::Result<F::Output> {
     use std::pin::Pin;
     use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
@@ -920,7 +919,7 @@ pub fn run_in_dummy_executor<F: std::future::Future>(future: F) -> Result<F::Out
     match f.as_mut().poll(&mut cx) {
         Poll::Ready(val) => return Ok(val),
         Poll::Pending =>
-            bail!("Cannot wait on pending future: must enable wiggle \"async\" future and execute on an async Store"),
+            anyhow::bail!("Cannot wait on pending future: must enable wiggle \"async\" future and execute on an async Store"),
     }
 
     fn dummy_waker() -> Waker {

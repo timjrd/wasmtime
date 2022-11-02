@@ -32,14 +32,14 @@ mod convert_just_errno {
     /// When the `errors` mapping in witx is non-empty, we need to impl the
     /// types::UserErrorConversion trait that wiggle generates from that mapping.
     impl<'a> types::UserErrorConversion for WasiCtx<'a> {
-        fn errno_from_rich_error(&mut self, e: RichError) -> Result<types::Errno> {
+        fn errno_from_rich_error(&mut self, e: RichError) -> wiggle::Error<types::Errno> {
             // WasiCtx can collect a Vec<String> log so we can test this. We're
             // logging the Display impl that `thiserror::Error` provides us.
             self.log.borrow_mut().push(e.to_string());
             // Then do the trivial mapping down to the flat enum.
             match e {
-                RichError::InvalidArg { .. } => Ok(types::Errno::InvalidArg),
-                RichError::PicketLine { .. } => Ok(types::Errno::PicketLine),
+                RichError::InvalidArg { .. } => wiggle::Error::new(types::Errno::InvalidArg),
+                RichError::PicketLine { .. } => wiggle::Error::new(types::Errno::PicketLine),
             }
         }
     }
@@ -142,13 +142,13 @@ mod convert_multiple_error_types {
     // each member of the `errors` mapping.
     // Bodies elided.
     impl<'a> types::UserErrorConversion for WasiCtx<'a> {
-        fn errno_from_rich_error(&mut self, _e: RichError) -> Result<types::Errno> {
+        fn errno_from_rich_error(&mut self, _e: RichError) -> wiggle::Error<types::Errno> {
             unimplemented!()
         }
         fn errno2_from_another_rich_error(
             &mut self,
             _e: AnotherRichError,
-        ) -> Result<types::Errno2> {
+        ) -> wiggle::Error<types::Errno2> {
             unimplemented!()
         }
     }

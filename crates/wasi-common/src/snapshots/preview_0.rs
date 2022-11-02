@@ -29,13 +29,16 @@ impl wiggle::GuestErrorType for types::Errno {
 }
 
 impl types::UserErrorConversion for WasiCtx {
-    fn errno_from_error(&mut self, e: Error) -> Result<types::Errno> {
+    fn errno_from_error(&mut self, e: Error) -> wiggle::Error<types::Errno> {
         debug!("Error: {:?}", e);
-        let errno = e.try_into()?;
-        Ok(errno)
+        match e.downcast::<snapshot1_types::Errno>() {
+            Ok(e) => wiggle::Error::new(types::Errno::from(e)),
+            Err(trapping) => wiggle::Error::trap(trapping),
+        }
     }
 }
 
+/// FIXME: We can get rid of this once the WasiFile/WasiDir trait methods are in terms of wiggle::Error<types::Errno>
 impl TryFrom<Error> for types::Errno {
     type Error = Error;
     fn try_from(e: Error) -> Result<types::Errno, Error> {

@@ -25,6 +25,17 @@ pub fn generate(doc: &witx::Document, names: &Names, settings: &CodegenSettings)
     let rt = names.runtime_mod();
 
     let types = doc.typenames().map(|t| define_datatype(&names, &t));
+    let error_types = settings.errors.iter().map(|errtype| {
+        let abi_typename = names.type_ref(&errtype.abi_type(), anon_lifetime());
+        quote! {
+            impl std::fmt::Display for #abi_typename {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    write!(f, "{:?}", self)
+                }
+            }
+            impl std::error::Error for #abi_typename {}
+        }
+    });
 
     let constants = doc.constants().map(|c| {
         let name = quote::format_ident!(
@@ -43,7 +54,7 @@ pub fn generate(doc: &witx::Document, names: &Names, settings: &CodegenSettings)
         let abi_typename = names.type_ref(&errtype.abi_type(), anon_lifetime());
         let user_typename = errtype.typename();
         let methodname = names.user_error_conversion_method(&errtype);
-        quote!(fn #methodname(&mut self, e: super::#user_typename) -> #rt::anyhow::Result<#abi_typename>;)
+        quote!(fn #methodname(&mut self, e: super::#user_typename) -> #rt::Error<#abi_typename>;)
     });
     let user_error_conversion = quote! {
         pub trait UserErrorConversion {
@@ -79,6 +90,7 @@ pub fn generate(doc: &witx::Document, names: &Names, settings: &CodegenSettings)
             use std::convert::TryFrom;
 
             #(#types)*
+            #(#error_types)*
             #(#constants)*
             #user_error_conversion
         }

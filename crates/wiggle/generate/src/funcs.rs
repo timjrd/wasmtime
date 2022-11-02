@@ -302,7 +302,7 @@ impl witx::Bindgen for Rust<'_> {
                     Some(custom) => {
                         let method = self.names.user_error_conversion_method(&custom);
                         self.bound(quote::format_ident!("UserErrorConversion"));
-                        quote!(UserErrorConversion::#method(ctx, #val)?)
+                        quote!(UserErrorConversion::#method(ctx, #val).downcast()?)
                     }
                     None => val,
                 };
