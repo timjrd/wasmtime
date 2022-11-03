@@ -61,13 +61,14 @@ pub fn define_module_trait(names: &Names, m: &Module, settings: &CodegenSettings
                     None => quote!(()),
                 };
                 let err = match err {
-                    Some(ty) => match settings.errors.for_abi_error(ty) {
-                        Some(custom) => {
-                            let tn = custom.typename();
-                            quote!(super::#tn)
+                    Some(ty) => {
+                        let tn = names.type_ref(ty, lifetime.clone());
+                        if settings.errors.for_abi_error(ty) {
+                            quote!(#rt::Error<#tn>)
+                        } else {
+                            quote!(#tn)
                         }
-                        None => names.type_ref(ty, lifetime.clone()),
-                    },
+                    }
                     None => quote!(()),
                 };
                 quote!(Result<#ok, #err>)

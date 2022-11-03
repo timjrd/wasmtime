@@ -4,7 +4,7 @@ use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
 use witx::{BuiltinType, Id, Type, TypeRef, WasmType};
 
-use crate::{lifetimes::LifetimeExt, UserErrorType};
+use crate::lifetimes::LifetimeExt;
 
 pub struct Names {
     runtime_mod: TokenStream,
@@ -194,15 +194,6 @@ impl Names {
                 _ => panic!("unexpected anonymous type: {:?}", ty),
             },
         }
-    }
-
-    pub fn user_error_conversion_method(&self, user_type: &UserErrorType) -> Ident {
-        let abi_type = Self::snake_typename(&user_type.abi_type());
-        format_ident!(
-            "{}_from_{}",
-            abi_type,
-            user_type.method_fragment().to_snake_case()
-        )
     }
 }
 

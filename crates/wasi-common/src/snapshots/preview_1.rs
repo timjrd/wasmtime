@@ -8,19 +8,19 @@ use crate::{
         subscription::{RwEventFlags, SubscriptionResult},
         Poll, Userdata,
     },
-    Error, ErrorExt, ErrorKind, I32Exit, SystemTimeSpec, WasiCtx,
+    I32Exit, SystemTimeSpec, WasiCtx,
 };
-use anyhow::{anyhow, Context, Result};
 use cap_std::time::{Duration, SystemClock};
 use std::convert::{TryFrom, TryInto};
 use std::io::{IoSlice, IoSliceMut};
 use std::ops::{Deref, DerefMut};
-use tracing::debug;
 use wiggle::GuestPtr;
+
+type Error = wiggle::Error<types::Errno>;
 
 wiggle::from_witx!({
     witx: ["$WASI_ROOT/phases/snapshot/witx/wasi_snapshot_preview1.witx"],
-    errors: { errno => Error },
+    errors: { errno },
     // Note: not every function actually needs to be async, however, nearly all of them do, and
     // keeping that set the same in this macro and the wasmtime_wiggle / lucet_wiggle macros is
     // tedious, and there is no cost to having a sync function be async in this case.
@@ -34,244 +34,88 @@ impl wiggle::GuestErrorType for types::Errno {
     }
 }
 
-impl types::UserErrorConversion for WasiCtx {
-    fn errno_from_error(&mut self, e: Error) -> wiggle::Error<types::Errno> {
-        debug!("Error: {:?}", e);
-        match e.try_into() {
-            Ok(errno) => wiggle::Error::new(errno),
-            Err(trap) => wiggle::Error::trap(trap),
-        }
-    }
-}
-
-impl TryFrom<Error> for types::Errno {
-    type Error = Error;
-    fn try_from(e: Error) -> Result<types::Errno, Error> {
-        use types::Errno;
-        if e.is::<ErrorKind>() {
-            let e = e.downcast::<ErrorKind>().unwrap();
-            Ok(e.into())
-        } else if e.is::<std::io::Error>() {
-            let e = e.downcast::<std::io::Error>().unwrap();
-            io_error(e).downcast()
-        } else if e.is::<wiggle::GuestError>() {
-            let e = e.downcast::<wiggle::GuestError>().unwrap();
-            guest_error(e).downcast()
-        } else if e.is::<std::num::TryFromIntError>() {
-            Ok(Errno::Overflow)
-        } else if e.is::<std::str::Utf8Error>() {
-            Ok(Errno::Ilseq)
-        } else {
-            Err(e)
-        }
-    }
-}
-
-impl From<ErrorKind> for types::Errno {
-    fn from(e: ErrorKind) -> types::Errno {
-        use types::Errno;
-        match e {
-            ErrorKind::TooBig => Errno::TooBig,
-            ErrorKind::Badf => Errno::Badf,
-            ErrorKind::Ilseq => Errno::Ilseq,
-            ErrorKind::Io => Errno::Io,
-            ErrorKind::Nametoolong => Errno::Nametoolong,
-            ErrorKind::Notdir => Errno::Notdir,
-            ErrorKind::Notsup => Errno::Notsup,
-            ErrorKind::Overflow => Errno::Overflow,
-            ErrorKind::Range => Errno::Range,
-            ErrorKind::Spipe => Errno::Spipe,
-            ErrorKind::Perm => Errno::Perm,
-        }
-    }
-}
-
 impl From<wiggle::GuestError> for types::Errno {
-    fn from(err: wiggle::GuestError) -> Self {
+    fn from(err: wiggle::GuestError) -> types::Errno {
         use wiggle::GuestError::*;
         match err {
-            InvalidFlagValue { .. } => Self::Inval,
-            InvalidEnumValue { .. } => Self::Inval,
-            PtrOverflow { .. } => Self::Fault,
-            PtrOutOfBounds { .. } => Self::Fault,
-            PtrNotAligned { .. } => Self::Inval,
-            PtrBorrowed { .. } => Self::Fault,
-            InvalidUtf8 { .. } => Self::Ilseq,
-            TryFromIntError { .. } => Self::Overflow,
-            SliceLengthsDiffer { .. } => Self::Fault,
-            BorrowCheckerOutOfHandles { .. } => Self::Fault,
+            InvalidFlagValue { .. } => types::Errno::Inval,
+            InvalidEnumValue { .. } => types::Errno::Inval,
+            PtrOverflow { .. } => types::Errno::Fault,
+            PtrOutOfBounds { .. } => types::Errno::Fault,
+            PtrNotAligned { .. } => types::Errno::Inval,
+            PtrBorrowed { .. } => types::Errno::Fault,
+            InvalidUtf8 { .. } => types::Errno::Ilseq,
+            TryFromIntError { .. } => types::Errno::Overflow,
+            SliceLengthsDiffer { .. } => types::Errno::Fault,
+            BorrowCheckerOutOfHandles { .. } => types::Errno::Fault,
         }
     }
 }
 
-pub fn guest_error(err: wiggle::GuestError) -> wiggle::Error<types::Errno> {
-    use wiggle::GuestError::*;
-    match err {
-        InvalidFlagValue { .. } => wiggle::Error::new(types::Errno::Inval),
-        InvalidEnumValue { .. } => wiggle::Error::new(types::Errno::Inval),
-        PtrOverflow { .. } => wiggle::Error::new(types::Errno::Fault),
-        PtrOutOfBounds { .. } => wiggle::Error::new(types::Errno::Fault),
-        PtrNotAligned { .. } => wiggle::Error::new(types::Errno::Inval),
-        PtrBorrowed { .. } => wiggle::Error::new(types::Errno::Fault),
-        InvalidUtf8 { .. } => wiggle::Error::new(types::Errno::Ilseq),
-        TryFromIntError { .. } => wiggle::Error::new(types::Errno::Overflow),
-        SliceLengthsDiffer { .. } => wiggle::Error::new(types::Errno::Fault),
-        BorrowCheckerOutOfHandles { .. } => wiggle::Error::new(types::Errno::Fault),
+impl From<std::num::TryFromIntError> for types::Errno {
+    fn from(err: std::num::TryFromIntError) -> types::Errno {
+        types::Errno::Overflow
     }
 }
-
-pub fn io_error(err: std::io::Error) -> wiggle::Error<types::Errno> {
-    #[cfg(unix)]
-    fn raw_error_code(err: &std::io::Error) -> Option<types::Errno> {
-        use rustix::io::Errno;
-        match Errno::from_io_error(err) {
-            Some(Errno::AGAIN) => Some(types::Errno::Again),
-            Some(Errno::PIPE) => Some(types::Errno::Pipe),
-            Some(Errno::PERM) => Some(types::Errno::Perm),
-            Some(Errno::NOENT) => Some(types::Errno::Noent),
-            Some(Errno::NOMEM) => Some(types::Errno::Nomem),
-            Some(Errno::TOOBIG) => Some(types::Errno::TooBig),
-            Some(Errno::IO) => Some(types::Errno::Io),
-            Some(Errno::BADF) => Some(types::Errno::Badf),
-            Some(Errno::BUSY) => Some(types::Errno::Busy),
-            Some(Errno::ACCESS) => Some(types::Errno::Acces),
-            Some(Errno::FAULT) => Some(types::Errno::Fault),
-            Some(Errno::NOTDIR) => Some(types::Errno::Notdir),
-            Some(Errno::ISDIR) => Some(types::Errno::Isdir),
-            Some(Errno::INVAL) => Some(types::Errno::Inval),
-            Some(Errno::EXIST) => Some(types::Errno::Exist),
-            Some(Errno::FBIG) => Some(types::Errno::Fbig),
-            Some(Errno::NOSPC) => Some(types::Errno::Nospc),
-            Some(Errno::SPIPE) => Some(types::Errno::Spipe),
-            Some(Errno::MFILE) => Some(types::Errno::Mfile),
-            Some(Errno::MLINK) => Some(types::Errno::Mlink),
-            Some(Errno::NAMETOOLONG) => Some(types::Errno::Nametoolong),
-            Some(Errno::NFILE) => Some(types::Errno::Nfile),
-            Some(Errno::NOTEMPTY) => Some(types::Errno::Notempty),
-            Some(Errno::LOOP) => Some(types::Errno::Loop),
-            Some(Errno::OVERFLOW) => Some(types::Errno::Overflow),
-            Some(Errno::ILSEQ) => Some(types::Errno::Ilseq),
-            Some(Errno::NOTSUP) => Some(types::Errno::Notsup),
-            Some(Errno::ADDRINUSE) => Some(types::Errno::Addrinuse),
-            Some(Errno::CANCELED) => Some(types::Errno::Canceled),
-            Some(Errno::ADDRNOTAVAIL) => Some(types::Errno::Addrnotavail),
-            Some(Errno::AFNOSUPPORT) => Some(types::Errno::Afnosupport),
-            Some(Errno::ALREADY) => Some(types::Errno::Already),
-            Some(Errno::CONNABORTED) => Some(types::Errno::Connaborted),
-            Some(Errno::CONNREFUSED) => Some(types::Errno::Connrefused),
-            Some(Errno::CONNRESET) => Some(types::Errno::Connreset),
-            Some(Errno::DESTADDRREQ) => Some(types::Errno::Destaddrreq),
-            Some(Errno::DQUOT) => Some(types::Errno::Dquot),
-            Some(Errno::HOSTUNREACH) => Some(types::Errno::Hostunreach),
-            Some(Errno::INPROGRESS) => Some(types::Errno::Inprogress),
-            Some(Errno::INTR) => Some(types::Errno::Intr),
-            Some(Errno::ISCONN) => Some(types::Errno::Isconn),
-            Some(Errno::MSGSIZE) => Some(types::Errno::Msgsize),
-            Some(Errno::NETDOWN) => Some(types::Errno::Netdown),
-            Some(Errno::NETRESET) => Some(types::Errno::Netreset),
-            Some(Errno::NETUNREACH) => Some(types::Errno::Netunreach),
-            Some(Errno::NOBUFS) => Some(types::Errno::Nobufs),
-            Some(Errno::NOPROTOOPT) => Some(types::Errno::Noprotoopt),
-            Some(Errno::NOTCONN) => Some(types::Errno::Notconn),
-            Some(Errno::NOTSOCK) => Some(types::Errno::Notsock),
-            Some(Errno::PROTONOSUPPORT) => Some(types::Errno::Protonosupport),
-            Some(Errno::PROTOTYPE) => Some(types::Errno::Prototype),
-            Some(Errno::STALE) => Some(types::Errno::Stale),
-            Some(Errno::TIMEDOUT) => Some(types::Errno::Timedout),
-
-            // On some platforms, these have the same value as other errno values.
-            #[allow(unreachable_patterns)]
-            Some(Errno::WOULDBLOCK) => Some(types::Errno::Again),
-            #[allow(unreachable_patterns)]
-            Some(Errno::OPNOTSUPP) => Some(types::Errno::Notsup),
-
-            _ => None,
+impl From<crate::Error> for wiggle::Error<types::Errno> {
+    fn from(e: crate::Error) -> wiggle::Error<types::Errno> {
+        match e {
+            crate::Error::Trap(e) => wiggle::Error::trap(e),
+            crate::Error::TooBig => types::Errno::TooBig.into(),
+            crate::Error::Acces => types::Errno::Acces.into(),
+            crate::Error::Addrinuse => types::Errno::Addrinuse.into(),
+            crate::Error::Addrnotavail => types::Errno::Addrnotavail.into(),
+            crate::Error::Afnosupport => types::Errno::Afnosupport.into(),
+            crate::Error::Again => types::Errno::Again.into(),
+            crate::Error::Already => types::Errno::Already.into(),
+            crate::Error::Badf => types::Errno::Badf.into(),
+            crate::Error::Busy => types::Errno::Busy.into(),
+            crate::Error::Canceled => types::Errno::Canceled.into(),
+            crate::Error::Connaborted => types::Errno::Connaborted.into(),
+            crate::Error::Connrefused => types::Errno::Connrefused.into(),
+            crate::Error::Connreset => types::Errno::Connreset.into(),
+            crate::Error::Destaddrreq => types::Errno::Destaddrreq.into(),
+            crate::Error::Dquot => types::Errno::Dquot.into(),
+            crate::Error::Exist => types::Errno::Exist.into(),
+            crate::Error::Fault => types::Errno::Fault.into(),
+            crate::Error::Fbig => types::Errno::Fbig.into(),
+            crate::Error::Hostunreach => types::Errno::Hostunreach.into(),
+            crate::Error::Ilseq => types::Errno::Ilseq.into(),
+            crate::Error::Inprogress => types::Errno::Inprogress.into(),
+            crate::Error::Intr => types::Errno::Intr.into(),
+            crate::Error::Inval => types::Errno::Inval.into(),
+            crate::Error::Io => types::Errno::Io.into(),
+            crate::Error::Isconn => types::Errno::Isconn.into(),
+            crate::Error::Isdir => types::Errno::Isdir.into(),
+            crate::Error::Loop => types::Errno::Loop.into(),
+            crate::Error::Mfile => types::Errno::Mfile.into(),
+            crate::Error::Mlink => types::Errno::Mlink.into(),
+            crate::Error::Msgsize => types::Errno::Msgsize.into(),
+            crate::Error::Nametoolong => types::Errno::Nametoolong.into(),
+            crate::Error::Netdown => types::Errno::Netdown.into(),
+            crate::Error::Netreset => types::Errno::Netreset.into(),
+            crate::Error::Netunreach => types::Errno::Netunreach.into(),
+            crate::Error::Nfile => types::Errno::Nfile.into(),
+            crate::Error::Nobufs => types::Errno::Nobufs.into(),
+            crate::Error::Noent => types::Errno::Noent.into(),
+            crate::Error::Nomem => types::Errno::Nomem.into(),
+            crate::Error::Noprotoopt => types::Errno::Noprotoopt.into(),
+            crate::Error::Nospc => types::Errno::Nospc.into(),
+            crate::Error::Notconn => types::Errno::Notconn.into(),
+            crate::Error::Notdir => types::Errno::Notdir.into(),
+            crate::Error::Notempty => types::Errno::Notempty.into(),
+            crate::Error::Notsock => types::Errno::Notsock.into(),
+            crate::Error::Notsup => types::Errno::Notsup.into(),
+            crate::Error::Overflow => types::Errno::Overflow.into(),
+            crate::Error::Perm => types::Errno::Perm.into(),
+            crate::Error::Pipe => types::Errno::Pipe.into(),
+            crate::Error::Protonosupport => types::Errno::Protonosupport.into(),
+            crate::Error::Prototype => types::Errno::Prototype.into(),
+            crate::Error::Range => types::Errno::Range.into(),
+            crate::Error::Spipe => types::Errno::Spipe.into(),
+            crate::Error::Stale => types::Errno::Stale.into(),
+            crate::Error::Timedout => types::Errno::Timedout.into(),
         }
-    }
-    #[cfg(windows)]
-    fn raw_error_code(err: &std::io::Error) -> Option<types::Errno> {
-        use windows_sys::Win32::Foundation;
-        use windows_sys::Win32::Networking::WinSock;
-
-        match err.raw_os_error().map(|code| code as u32) {
-            Some(Foundation::ERROR_BAD_ENVIRONMENT) => return Some(types::Errno::TooBig),
-            Some(Foundation::ERROR_FILE_NOT_FOUND) => return Some(types::Errno::Noent),
-            Some(Foundation::ERROR_PATH_NOT_FOUND) => return Some(types::Errno::Noent),
-            Some(Foundation::ERROR_TOO_MANY_OPEN_FILES) => return Some(types::Errno::Nfile),
-            Some(Foundation::ERROR_ACCESS_DENIED) => return Some(types::Errno::Acces),
-            Some(Foundation::ERROR_SHARING_VIOLATION) => return Some(types::Errno::Acces),
-            Some(Foundation::ERROR_PRIVILEGE_NOT_HELD) => return Some(types::Errno::Perm),
-            Some(Foundation::ERROR_INVALID_HANDLE) => return Some(types::Errno::Badf),
-            Some(Foundation::ERROR_INVALID_NAME) => return Some(types::Errno::Noent),
-            Some(Foundation::ERROR_NOT_ENOUGH_MEMORY) => return Some(types::Errno::Nomem),
-            Some(Foundation::ERROR_OUTOFMEMORY) => return Some(types::Errno::Nomem),
-            Some(Foundation::ERROR_DIR_NOT_EMPTY) => return Some(types::Errno::Notempty),
-            Some(Foundation::ERROR_NOT_READY) => return Some(types::Errno::Busy),
-            Some(Foundation::ERROR_BUSY) => return Some(types::Errno::Busy),
-            Some(Foundation::ERROR_NOT_SUPPORTED) => return Some(types::Errno::Notsup),
-            Some(Foundation::ERROR_FILE_EXISTS) => return Some(types::Errno::Exist),
-            Some(Foundation::ERROR_BROKEN_PIPE) => return Some(types::Errno::Pipe),
-            Some(Foundation::ERROR_BUFFER_OVERFLOW) => return Some(types::Errno::Nametoolong),
-            Some(Foundation::ERROR_NOT_A_REPARSE_POINT) => return Some(types::Errno::Inval),
-            Some(Foundation::ERROR_NEGATIVE_SEEK) => return Some(types::Errno::Inval),
-            Some(Foundation::ERROR_DIRECTORY) => return Some(types::Errno::Notdir),
-            Some(Foundation::ERROR_ALREADY_EXISTS) => return Some(types::Errno::Exist),
-            Some(Foundation::ERROR_STOPPED_ON_SYMLINK) => return Some(types::Errno::Loop),
-            Some(Foundation::ERROR_DIRECTORY_NOT_SUPPORTED) => return Some(types::Errno::Isdir),
-            _ => {}
-        }
-
-        match err.raw_os_error() {
-            Some(WinSock::WSAEWOULDBLOCK) => Some(types::Errno::Again),
-            Some(WinSock::WSAECANCELLED) => Some(types::Errno::Canceled),
-            Some(WinSock::WSA_E_CANCELLED) => Some(types::Errno::Canceled),
-            Some(WinSock::WSAEBADF) => Some(types::Errno::Badf),
-            Some(WinSock::WSAEFAULT) => Some(types::Errno::Fault),
-            Some(WinSock::WSAEINVAL) => Some(types::Errno::Inval),
-            Some(WinSock::WSAEMFILE) => Some(types::Errno::Mfile),
-            Some(WinSock::WSAENAMETOOLONG) => Some(types::Errno::Nametoolong),
-            Some(WinSock::WSAENOTEMPTY) => Some(types::Errno::Notempty),
-            Some(WinSock::WSAELOOP) => Some(types::Errno::Loop),
-            Some(WinSock::WSAEOPNOTSUPP) => Some(types::Errno::Notsup),
-            Some(WinSock::WSAEADDRINUSE) => Some(types::Errno::Addrinuse),
-            Some(WinSock::WSAEACCES) => Some(types::Errno::Acces),
-            Some(WinSock::WSAEADDRNOTAVAIL) => Some(types::Errno::Addrnotavail),
-            Some(WinSock::WSAEAFNOSUPPORT) => Some(types::Errno::Afnosupport),
-            Some(WinSock::WSAEALREADY) => Some(types::Errno::Already),
-            Some(WinSock::WSAECONNABORTED) => Some(types::Errno::Connaborted),
-            Some(WinSock::WSAECONNREFUSED) => Some(types::Errno::Connrefused),
-            Some(WinSock::WSAECONNRESET) => Some(types::Errno::Connreset),
-            Some(WinSock::WSAEDESTADDRREQ) => Some(types::Errno::Destaddrreq),
-            Some(WinSock::WSAEDQUOT) => Some(types::Errno::Dquot),
-            Some(WinSock::WSAEHOSTUNREACH) => Some(types::Errno::Hostunreach),
-            Some(WinSock::WSAEINPROGRESS) => Some(types::Errno::Inprogress),
-            Some(WinSock::WSAEINTR) => Some(types::Errno::Intr),
-            Some(WinSock::WSAEISCONN) => Some(types::Errno::Isconn),
-            Some(WinSock::WSAEMSGSIZE) => Some(types::Errno::Msgsize),
-            Some(WinSock::WSAENETDOWN) => Some(types::Errno::Netdown),
-            Some(WinSock::WSAENETRESET) => Some(types::Errno::Netreset),
-            Some(WinSock::WSAENETUNREACH) => Some(types::Errno::Netunreach),
-            Some(WinSock::WSAENOBUFS) => Some(types::Errno::Nobufs),
-            Some(WinSock::WSAENOPROTOOPT) => Some(types::Errno::Noprotoopt),
-            Some(WinSock::WSAENOTCONN) => Some(types::Errno::Notconn),
-            Some(WinSock::WSAENOTSOCK) => Some(types::Errno::Notsock),
-            Some(WinSock::WSAEPROTONOSUPPORT) => Some(types::Errno::Protonosupport),
-            Some(WinSock::WSAEPROTOTYPE) => Some(types::Errno::Prototype),
-            Some(WinSock::WSAESTALE) => Some(types::Errno::Stale),
-            Some(WinSock::WSAETIMEDOUT) => Some(types::Errno::Timedout),
-            _ => None,
-        }
-    }
-
-    match raw_error_code(&err) {
-        Some(errno) => wiggle::Error::new(errno),
-        None => match err.kind() {
-            std::io::ErrorKind::NotFound => wiggle::Error::new(types::Errno::Noent),
-            std::io::ErrorKind::PermissionDenied => wiggle::Error::new(types::Errno::Perm),
-            std::io::ErrorKind::AlreadyExists => wiggle::Error::new(types::Errno::Exist),
-            std::io::ErrorKind::InvalidInput => wiggle::Error::new(types::Errno::Inval),
-            _ => wiggle::Error::trap(anyhow::anyhow!(err)).context("Unknown OS error"),
-        },
     }
 }
 
@@ -282,7 +126,8 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
         argv: &GuestPtr<'b, GuestPtr<'b, u8>>,
         argv_buf: &GuestPtr<'b, u8>,
     ) -> Result<(), Error> {
-        self.args.write_to_guest(argv_buf, argv)
+        self.args.write_to_guest(argv_buf, argv)?;
+        Ok(())
     }
 
     async fn args_sizes_get(&mut self) -> Result<(types::Size, types::Size), Error> {
@@ -294,7 +139,8 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
         environ: &GuestPtr<'b, GuestPtr<'b, u8>>,
         environ_buf: &GuestPtr<'b, u8>,
     ) -> Result<(), Error> {
-        self.env.write_to_guest(environ_buf, environ)
+        self.env.write_to_guest(environ_buf, environ)?;
+        Ok(())
     }
 
     async fn environ_sizes_get(&mut self) -> Result<(types::Size, types::Size), Error> {
@@ -306,7 +152,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
             types::Clockid::Realtime => Ok(self.clocks.system.resolution()),
             types::Clockid::Monotonic => Ok(self.clocks.monotonic.resolution()),
             types::Clockid::ProcessCputimeId | types::Clockid::ThreadCputimeId => {
-                Err(Error::badf().context("process and thread clocks are not supported"))
+                Err(crate::Error::badf())
             }
         }?;
         Ok(resolution.as_nanos().try_into()?)
@@ -323,7 +169,9 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
                 let now = self.clocks.system.now(precision).into_std();
                 let d = now
                     .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                    .map_err(|_| Error::trap("current time before unix epoch"))?;
+                    .map_err(|_| {
+                        crate::Error::trap(anyhow::Error::msg("current time before unix epoch"))
+                    })?;
                 Ok(d.as_nanos().try_into()?)
             }
             types::Clockid::Monotonic => {
@@ -332,7 +180,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
                 Ok(d.as_nanos().try_into()?)
             }
             types::Clockid::ProcessCputimeId | types::Clockid::ThreadCputimeId => {
-                Err(Error::badf().context("process and thread clocks are not supported"))
+                Err(crate::Error::badf())?
             }
         }
     }
@@ -372,7 +220,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
 
         // Fail fast: If not present in table, Badf
         if !table.contains_key(fd) {
-            return Err(Error::badf().context("key not in table"));
+            Err(crate::Error::badf())?;
         }
         // fd_close must close either a File or a Dir handle
         if table.is::<FileEntry>(fd) {
@@ -381,12 +229,12 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
             // We cannot close preopened directories
             let dir_entry: &DirEntry = table.get(fd).unwrap();
             if dir_entry.preopen_path().is_some() {
-                return Err(Error::not_supported().context("cannot close propened directory"));
+                Err(crate::Error::not_supported())?;
             }
             drop(dir_entry);
             let _ = table.delete(fd);
         } else {
-            return Err(Error::badf().context("key does not refer to file or directory"));
+            Err(crate::Error::badf())?;
         }
 
         Ok(())
@@ -413,7 +261,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
             let dir_fdstat = dir_entry.get_dir_fdstat();
             Ok(types::Fdstat::from(&dir_fdstat))
         } else {
-            Err(Error::badf())
+            Err(crate::Error::badf())?
         }
     }
 
@@ -426,7 +274,8 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
             .get_file_mut(u32::from(fd))?
             .get_cap_mut(FileCaps::FDSTAT_SET_FLAGS)?
             .set_fdflags(FdFlags::from(flags))
-            .await
+            .await?;
+        Ok(())
     }
 
     async fn fd_fdstat_set_rights(
@@ -440,14 +289,16 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
         if table.is::<FileEntry>(fd) {
             let file_entry: &mut FileEntry = table.get_mut(fd)?;
             let file_caps = FileCaps::from(&fs_rights_base);
-            file_entry.drop_caps_to(file_caps)
+            file_entry.drop_caps_to(file_caps)?;
+            Ok(())
         } else if table.is::<DirEntry>(fd) {
             let dir_entry: &mut DirEntry = table.get_mut(fd)?;
             let dir_caps = DirCaps::from(&fs_rights_base);
             let file_caps = FileCaps::from(&fs_rights_inheriting);
-            dir_entry.drop_caps_to(dir_caps, file_caps)
+            dir_entry.drop_caps_to(dir_caps, file_caps)?;
+            Ok(())
         } else {
-            Err(Error::badf())
+            Err(crate::Error::badf())?
         }
     }
 
@@ -469,7 +320,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
                 .await?;
             Ok(filestat.into())
         } else {
-            Err(Error::badf())
+            Err(crate::Error::badf())?
         }
     }
 
@@ -501,8 +352,8 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
         let set_mtim = fst_flags.contains(types::Fstflags::MTIM);
         let set_mtim_now = fst_flags.contains(types::Fstflags::MTIM_NOW);
 
-        let atim = systimespec(set_atim, atim, set_atim_now).context("atim")?;
-        let mtim = systimespec(set_mtim, mtim, set_mtim_now).context("mtim")?;
+        let atim = systimespec(set_atim, atim, set_atim_now)?;
+        let mtim = systimespec(set_mtim, mtim, set_mtim_now)?;
 
         if table.is::<FileEntry>(fd) {
             table
@@ -510,16 +361,18 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
                 .expect("checked that entry is file")
                 .get_cap_mut(FileCaps::FILESTAT_SET_TIMES)?
                 .set_times(atim, mtim)
-                .await
+                .await?;
+            Ok(())
         } else if table.is::<DirEntry>(fd) {
             table
                 .get_dir(fd)
                 .expect("checked that entry is dir")
                 .get_cap(DirCaps::FILESTAT_SET_TIMES)?
                 .set_times(".", atim, mtim, false)
-                .await
+                .await?;
+            Ok(())
         } else {
-            Err(Error::badf())
+            Err(crate::Error::badf())?
         }
     }
 
@@ -540,7 +393,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
                 let iov: types::Iovec = iov_ptr.read()?;
                 Ok(iov.buf.as_array(iov.buf_len).as_slice_mut()?)
             })
-            .collect::<Result<_, Error>>()?;
+            .collect::<Result<_, types::Errno>>()?;
 
         let mut ioslices: Vec<IoSliceMut> = guest_slices
             .iter_mut()
@@ -548,7 +401,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
             .collect();
 
         let bytes_read = f.read_vectored(&mut ioslices).await?;
-        Ok(types::Size::try_from(bytes_read)?)
+        Ok(types::Size::try_from(bytes_read).map_err(types::Errno::from)?)
     }
 
     async fn fd_pread<'a>(
@@ -569,7 +422,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
                 let iov: types::Iovec = iov_ptr.read()?;
                 Ok(iov.buf.as_array(iov.buf_len).as_slice_mut()?)
             })
-            .collect::<Result<_, Error>>()?;
+            .collect::<Result<_, types::Errno>>()?;
 
         let mut ioslices: Vec<IoSliceMut> = guest_slices
             .iter_mut()
@@ -577,7 +430,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
             .collect();
 
         let bytes_read = f.read_vectored_at(&mut ioslices, offset).await?;
-        Ok(types::Size::try_from(bytes_read)?)
+        Ok(types::Size::try_from(bytes_read).map_err(types::Errno::from)?)
     }
 
     async fn fd_write<'a>(
@@ -597,7 +450,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
                 let iov: types::Ciovec = iov_ptr.read()?;
                 Ok(iov.buf.as_array(iov.buf_len).as_slice()?)
             })
-            .collect::<Result<_, Error>>()?;
+            .collect::<Result<_, types::Errno>>()?;
 
         let ioslices: Vec<IoSlice> = guest_slices
             .iter()
@@ -605,7 +458,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
             .collect();
         let bytes_written = f.write_vectored(&ioslices).await?;
 
-        Ok(types::Size::try_from(bytes_written)?)
+        Ok(types::Size::try_from(bytes_written).map_err(types::Errno::from)?)
     }
 
     async fn fd_pwrite<'a>(
@@ -626,7 +479,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
                 let iov: types::Ciovec = iov_ptr.read()?;
                 Ok(iov.buf.as_array(iov.buf_len).as_slice()?)
             })
-            .collect::<Result<_, Error>>()?;
+            .collect::<Result<_, types::Errno>>()?;
 
         let ioslices: Vec<IoSlice> = guest_slices
             .iter()
@@ -634,18 +487,21 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
             .collect();
         let bytes_written = f.write_vectored_at(&ioslices, offset).await?;
 
-        Ok(types::Size::try_from(bytes_written)?)
+        Ok(types::Size::try_from(bytes_written).map_err(types::Errno::from)?)
     }
 
     async fn fd_prestat_get(&mut self, fd: types::Fd) -> Result<types::Prestat, Error> {
         let table = self.table();
-        let dir_entry: &DirEntry = table.get(u32::from(fd)).map_err(|_| Error::badf())?;
+        let dir_entry: &DirEntry = table.get(u32::from(fd)).map_err(|_| crate::Error::badf())?;
         if let Some(ref preopen) = dir_entry.preopen_path() {
-            let path_str = preopen.to_str().ok_or_else(|| Error::not_supported())?;
-            let pr_name_len = u32::try_from(path_str.as_bytes().len())?;
+            let path_str = preopen
+                .to_str()
+                .ok_or_else(|| crate::Error::not_supported())?;
+            let pr_name_len =
+                u32::try_from(path_str.as_bytes().len()).map_err(types::Errno::from)?;
             Ok(types::Prestat::Dir(types::PrestatDir { pr_name_len }))
         } else {
-            Err(Error::not_supported().context("file is not a preopen"))
+            Err(crate::Error::not_supported())?
         }
     }
 
@@ -656,21 +512,26 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
         path_max_len: types::Size,
     ) -> Result<(), Error> {
         let table = self.table();
-        let dir_entry: &DirEntry = table.get(u32::from(fd)).map_err(|_| Error::not_dir())?;
+        let dir_entry: &DirEntry = table
+            .get(u32::from(fd))
+            .map_err(|_| crate::Error::not_dir())?;
         if let Some(ref preopen) = dir_entry.preopen_path() {
             let path_bytes = preopen
                 .to_str()
-                .ok_or_else(|| Error::not_supported())?
+                .ok_or_else(|| crate::Error::not_supported())?
                 .as_bytes();
             let path_len = path_bytes.len();
             if path_len < path_max_len as usize {
-                return Err(Error::name_too_long());
+                Err(crate::Error::name_too_long())?;
             }
-            let mut p_memory = path.as_array(path_len as u32).as_slice_mut()?;
+            let mut p_memory = path
+                .as_array(path_len as u32)
+                .as_slice_mut()
+                .map_err(types::Errno::from)?;
             p_memory.copy_from_slice(path_bytes);
             Ok(())
         } else {
-            Err(Error::not_supported())
+            Err(crate::Error::not_supported())?
         }
     }
     async fn fd_renumber(&mut self, from: types::Fd, to: types::Fd) -> Result<(), Error> {
@@ -678,10 +539,10 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
         let from = u32::from(from);
         let to = u32::from(to);
         if !table.contains_key(from) {
-            return Err(Error::badf());
+            Err(crate::Error::badf())?;
         }
         if table.is_preopen(from) || table.is_preopen(to) {
-            return Err(Error::not_supported().context("cannot renumber a preopen"));
+            Err(crate::Error::not_supported())?;
         }
         let from_entry = table
             .delete(from)
@@ -756,14 +617,16 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
         {
             let entity = entity?;
             let dirent_raw = dirent_bytes(types::Dirent::try_from(&entity)?);
-            let dirent_len: types::Size = dirent_raw.len().try_into()?;
+            let dirent_len: types::Size =
+                dirent_raw.len().try_into().map_err(crate::Error::from)?;
             let name_raw = entity.name.as_bytes();
-            let name_len: types::Size = name_raw.len().try_into()?;
+            let name_len: types::Size = name_raw.len().try_into().map_err(crate::Error::from)?;
 
             // Copy as many bytes of the dirent as we can, up to the end of the buffer
             let dirent_copy_len = std::cmp::min(dirent_len, buf_len - bufused);
             buf.as_array(dirent_copy_len)
-                .copy_from_slice(&dirent_raw[..dirent_copy_len as usize])?;
+                .copy_from_slice(&dirent_raw[..dirent_copy_len as usize])
+                .map_err(types::Errno::from)?;
 
             // If the dirent struct wasnt compied entirely, return that we filled the buffer, which
             // tells libc that we're not at EOF.
@@ -771,13 +634,14 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
                 return Ok(buf_len);
             }
 
-            buf = buf.add(dirent_copy_len)?;
+            buf = buf.add(dirent_copy_len).map_err(types::Errno::from)?;
             bufused += dirent_copy_len;
 
             // Copy as many bytes of the name as we can, up to the end of the buffer
             let name_copy_len = std::cmp::min(name_len, buf_len - bufused);
             buf.as_array(name_copy_len)
-                .copy_from_slice(&name_raw[..name_copy_len as usize])?;
+                .copy_from_slice(&name_raw[..name_copy_len as usize])
+                .map_err(types::Errno::from)?;
 
             // If the dirent struct wasn't copied entirely, return that we filled the buffer, which
             // tells libc that we're not at EOF
@@ -786,7 +650,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
                 return Ok(buf_len);
             }
 
-            buf = buf.add(name_copy_len)?;
+            buf = buf.add(name_copy_len).map_err(types::Errno::from)?;
             bufused += name_copy_len;
         }
         Ok(bufused)
@@ -800,8 +664,9 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
         self.table()
             .get_dir(u32::from(dirfd))?
             .get_cap(DirCaps::CREATE_DIRECTORY)?
-            .create_dir(path.as_str()?.deref())
-            .await
+            .create_dir(path.as_str().map_err(types::Errno::from)?.deref())
+            .await?;
+        Ok(())
     }
 
     async fn path_filestat_get<'a>(
@@ -815,7 +680,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
             .get_dir(u32::from(dirfd))?
             .get_cap(DirCaps::PATH_FILESTAT_GET)?
             .get_path_filestat(
-                path.as_str()?.deref(),
+                path.as_str().map_err(crate::Error::from)?.deref(),
                 flags.contains(types::Lookupflags::SYMLINK_FOLLOW),
             )
             .await?;
@@ -836,18 +701,19 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
         let set_mtim = fst_flags.contains(types::Fstflags::MTIM);
         let set_mtim_now = fst_flags.contains(types::Fstflags::MTIM_NOW);
 
-        let atim = systimespec(set_atim, atim, set_atim_now).context("atim")?;
-        let mtim = systimespec(set_mtim, mtim, set_mtim_now).context("mtim")?;
+        let atim = systimespec(set_atim, atim, set_atim_now)?;
+        let mtim = systimespec(set_mtim, mtim, set_mtim_now)?;
         self.table()
             .get_dir(u32::from(dirfd))?
             .get_cap(DirCaps::PATH_FILESTAT_SET_TIMES)?
             .set_times(
-                path.as_str()?.deref(),
+                path.as_str().map_err(crate::Error::from)?.deref(),
                 atim,
                 mtim,
                 flags.contains(types::Lookupflags::SYMLINK_FOLLOW),
             )
-            .await
+            .await?;
+        Ok(())
     }
 
     async fn path_link<'a>(
@@ -867,17 +733,17 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
             .get_cap(DirCaps::LINK_TARGET)?;
         let symlink_follow = src_flags.contains(types::Lookupflags::SYMLINK_FOLLOW);
         if symlink_follow {
-            return Err(Error::invalid_argument()
-                .context("symlink following on path_link is not supported"));
+            Err(crate::Error::invalid_argument())?
         }
 
         src_dir
             .hard_link(
-                src_path.as_str()?.deref(),
+                src_path.as_str().map_err(types::Errno::from)?.deref(),
                 target_dir.deref(),
-                target_path.as_str()?.deref(),
+                target_path.as_str().map_err(types::Errno::from)?.deref(),
             )
-            .await
+            .await?;
+        Ok(())
     }
 
     async fn path_open<'a>(
@@ -893,7 +759,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
         let table = self.table();
         let dirfd = u32::from(dirfd);
         if table.is::<FileEntry>(dirfd) {
-            return Err(Error::not_dir());
+            Err(crate::Error::not_dir())?;
         }
         let dir_entry = table.get_dir(dirfd)?;
 
@@ -901,13 +767,13 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
 
         let oflags = OFlags::from(&oflags);
         let fdflags = FdFlags::from(fdflags);
-        let path = path.as_str()?;
+        let path = path.as_str().map_err(types::Errno::from)?;
         if oflags.contains(OFlags::DIRECTORY) {
             if oflags.contains(OFlags::CREATE)
                 || oflags.contains(OFlags::EXCLUSIVE)
                 || oflags.contains(OFlags::TRUNCATE)
             {
-                return Err(Error::invalid_argument().context("directory oflags"));
+                Err(crate::Error::invalid_argument())?
             }
             let dir_caps = dir_entry.child_dir_caps(DirCaps::from(&fs_rights_base));
             let file_caps = dir_entry.child_file_caps(FileCaps::from(&fs_rights_inheriting));
@@ -950,17 +816,20 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
             .table()
             .get_dir(u32::from(dirfd))?
             .get_cap(DirCaps::READLINK)?
-            .read_link(path.as_str()?.deref())
+            .read_link(path.as_str().map_err(types::Errno::from)?.deref())
             .await?
             .into_os_string()
             .into_string()
-            .map_err(|_| Error::illegal_byte_sequence().context("link contents"))?;
+            .map_err(|_| crate::Error::illegal_byte_sequence())?;
         let link_bytes = link.as_bytes();
         let link_len = link_bytes.len();
         if link_len > buf_len as usize {
-            return Err(Error::range());
+            Err(crate::Error::range())?
         }
-        let mut buf = buf.as_array(link_len as u32).as_slice_mut()?;
+        let mut buf = buf
+            .as_array(link_len as u32)
+            .as_slice_mut()
+            .map_err(types::Errno::from)?;
         buf.copy_from_slice(link_bytes);
         Ok(link_len as types::Size)
     }
@@ -973,8 +842,9 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
         self.table()
             .get_dir(u32::from(dirfd))?
             .get_cap(DirCaps::REMOVE_DIRECTORY)?
-            .remove_dir(path.as_str()?.deref())
-            .await
+            .remove_dir(path.as_str().map_err(types::Errno::from)?.deref())
+            .await?;
+        Ok(())
     }
 
     async fn path_rename<'a>(
@@ -993,11 +863,12 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
             .get_cap(DirCaps::RENAME_TARGET)?;
         src_dir
             .rename(
-                src_path.as_str()?.deref(),
+                src_path.as_str().map_err(types::Errno::from)?.deref(),
                 dest_dir.deref(),
-                dest_path.as_str()?.deref(),
+                dest_path.as_str().map_err(types::Errno::from)?.deref(),
             )
-            .await
+            .await?;
+        Ok(())
     }
 
     async fn path_symlink<'a>(
@@ -1009,8 +880,12 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
         self.table()
             .get_dir(u32::from(dirfd))?
             .get_cap(DirCaps::SYMLINK)?
-            .symlink(src_path.as_str()?.deref(), dest_path.as_str()?.deref())
-            .await
+            .symlink(
+                src_path.as_str().map_err(types::Errno::from)?.deref(),
+                dest_path.as_str().map_err(types::Errno::from)?.deref(),
+            )
+            .await?;
+        Ok(())
     }
 
     async fn path_unlink_file<'a>(
@@ -1021,8 +896,9 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
         self.table()
             .get_dir(u32::from(dirfd))?
             .get_cap(DirCaps::UNLINK_FILE)?
-            .unlink_file(path.as_str()?.deref())
-            .await
+            .unlink_file(path.as_str().map_err(types::Errno::from)?.deref())
+            .await?;
+        Ok(())
     }
 
     async fn poll_oneoff<'a>(
@@ -1032,7 +908,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
         nsubscriptions: types::Size,
     ) -> Result<types::Size, Error> {
         if nsubscriptions == 0 {
-            return Err(Error::invalid_argument().context("nsubscriptions must be nonzero"));
+            Err(crate::Error::invalid_argument())?
         }
 
         // Special-case a `poll_oneoff` which is just sleeping on a single
@@ -1040,7 +916,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
         // functions. This supports all clock IDs, because POSIX says that
         // `clock_settime` doesn't effect relative sleeps.
         if nsubscriptions == 1 {
-            let sub = subs.read()?;
+            let sub = subs.read().map_err(types::Errno::from)?;
             if let types::SubscriptionU::Clock(clocksub) = sub.u {
                 if !clocksub
                     .flags
@@ -1049,12 +925,14 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
                     self.sched
                         .sleep(Duration::from_nanos(clocksub.timeout))
                         .await?;
-                    events.write(types::Event {
-                        userdata: sub.userdata,
-                        error: types::Errno::Success,
-                        type_: types::Eventtype::Clock,
-                        fd_readwrite: fd_readwrite_empty(),
-                    })?;
+                    events
+                        .write(types::Event {
+                            userdata: sub.userdata,
+                            error: types::Errno::Success,
+                            type_: types::Eventtype::Clock,
+                            fd_readwrite: fd_readwrite_empty(),
+                        })
+                        .map_err(types::Errno::from)?;
                     return Ok(1);
                 }
             }
@@ -1068,8 +946,8 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
 
         let subs = subs.as_array(nsubscriptions);
         for sub_elem in subs.iter() {
-            let sub_ptr = sub_elem?;
-            let sub = sub_ptr.read()?;
+            let sub_ptr = sub_elem.map_err(types::Errno::from)?;
+            let sub = sub_ptr.read().map_err(types::Errno::from)?;
             match sub.u {
                 types::SubscriptionU::Clock(clocksub) => match clocksub.id {
                     types::Clockid::Monotonic => {
@@ -1083,12 +961,12 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
                             self.clocks
                                 .creation_time
                                 .checked_add(duration)
-                                .ok_or_else(|| Error::overflow().context("deadline"))?
+                                .ok_or_else(|| crate::Error::overflow())?
                         } else {
                             clock
                                 .now(precision)
                                 .checked_add(duration)
-                                .ok_or_else(|| Error::overflow().context("deadline"))?
+                                .ok_or_else(|| crate::Error::overflow())?
                         };
                         poll.subscribe_monotonic_clock(
                             clock,
@@ -1110,12 +988,12 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
                             .flags
                             .contains(types::Subclockflags::SUBSCRIPTION_CLOCK_ABSTIME)
                         {
-                            return Err(Error::not_supported());
+                            Err(crate::Error::not_supported())?
                         } else {
                             clock
                                 .now(precision)
                                 .checked_add(duration)
-                                .ok_or_else(|| Error::overflow().context("deadline"))?
+                                .ok_or_else(|| crate::Error::overflow())?
                         };
                         poll.subscribe_monotonic_clock(
                             clock,
@@ -1124,8 +1002,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
                             sub.userdata.into(),
                         )
                     }
-                    _ => Err(Error::invalid_argument()
-                        .context("timer subscriptions only support monotonic timer"))?,
+                    _ => Err(crate::Error::invalid_argument())?,
                 },
                 types::SubscriptionU::FdRead(readsub) => {
                     let fd = readsub.file_descriptor;
@@ -1165,62 +1042,64 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
                 .expect("not greater than nsubscriptions"),
         );
         for ((result, userdata), event_elem) in results.into_iter().zip(events.iter()) {
-            let event_ptr = event_elem?;
+            let event_ptr = event_elem.map_err(types::Errno::from)?;
             let userdata: types::Userdata = userdata.into();
-            event_ptr.write(match result {
-                SubscriptionResult::Read(r) => {
-                    let type_ = types::Eventtype::FdRead;
-                    match r {
-                        Ok((nbytes, flags)) => types::Event {
-                            userdata,
-                            error: types::Errno::Success,
-                            type_,
-                            fd_readwrite: types::EventFdReadwrite {
-                                nbytes,
-                                flags: types::Eventrwflags::from(&flags),
+            event_ptr
+                .write(match result {
+                    SubscriptionResult::Read(r) => {
+                        let type_ = types::Eventtype::FdRead;
+                        match r {
+                            Ok((nbytes, flags)) => types::Event {
+                                userdata,
+                                error: types::Errno::Success,
+                                type_,
+                                fd_readwrite: types::EventFdReadwrite {
+                                    nbytes,
+                                    flags: types::Eventrwflags::from(&flags),
+                                },
                             },
-                        },
-                        Err(e) => types::Event {
+                            Err(e) => types::Event {
+                                userdata,
+                                error: Error::from(e).downcast().map_err(Error::trap)?,
+                                type_,
+                                fd_readwrite: fd_readwrite_empty(),
+                            },
+                        }
+                    }
+                    SubscriptionResult::Write(r) => {
+                        let type_ = types::Eventtype::FdWrite;
+                        match r {
+                            Ok((nbytes, flags)) => types::Event {
+                                userdata,
+                                error: types::Errno::Success,
+                                type_,
+                                fd_readwrite: types::EventFdReadwrite {
+                                    nbytes,
+                                    flags: types::Eventrwflags::from(&flags),
+                                },
+                            },
+                            Err(e) => types::Event {
+                                userdata,
+                                error: Error::from(e).downcast().map_err(Error::trap)?,
+                                type_,
+                                fd_readwrite: fd_readwrite_empty(),
+                            },
+                        }
+                    }
+                    SubscriptionResult::MonotonicClock(r) => {
+                        let type_ = types::Eventtype::Clock;
+                        types::Event {
                             userdata,
-                            error: e.try_into().expect("non-trapping"),
+                            error: match r {
+                                Ok(()) => types::Errno::Success,
+                                Err(e) => Error::from(e).downcast().map_err(Error::trap)?,
+                            },
                             type_,
                             fd_readwrite: fd_readwrite_empty(),
-                        },
+                        }
                     }
-                }
-                SubscriptionResult::Write(r) => {
-                    let type_ = types::Eventtype::FdWrite;
-                    match r {
-                        Ok((nbytes, flags)) => types::Event {
-                            userdata,
-                            error: types::Errno::Success,
-                            type_,
-                            fd_readwrite: types::EventFdReadwrite {
-                                nbytes,
-                                flags: types::Eventrwflags::from(&flags),
-                            },
-                        },
-                        Err(e) => types::Event {
-                            userdata,
-                            error: e.try_into()?,
-                            type_,
-                            fd_readwrite: fd_readwrite_empty(),
-                        },
-                    }
-                }
-                SubscriptionResult::MonotonicClock(r) => {
-                    let type_ = types::Eventtype::Clock;
-                    types::Event {
-                        userdata,
-                        error: match r {
-                            Ok(()) => types::Errno::Success,
-                            Err(e) => e.try_into()?,
-                        },
-                        type_,
-                        fd_readwrite: fd_readwrite_empty(),
-                    }
-                }
-            })?;
+                })
+                .map_err(crate::Error::from)?;
         }
 
         Ok(num_results.try_into().expect("results fit into memory"))
@@ -1231,16 +1110,17 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
         if status < 126 {
             I32Exit(status as i32).into()
         } else {
-            anyhow!("exit with invalid exit status outside of [0..126)")
+            anyhow::Error::msg("exit with invalid exit status outside of [0..126)")
         }
     }
 
     async fn proc_raise(&mut self, _sig: types::Signal) -> Result<(), Error> {
-        Err(Error::trap("proc_raise unsupported"))
+        Err(Error::trap(anyhow::Error::msg("proc_raise unsupported")))
     }
 
     async fn sched_yield(&mut self) -> Result<(), Error> {
-        self.sched.sched_yield().await
+        self.sched.sched_yield().await?;
+        Ok(())
     }
 
     async fn random_get<'a>(
@@ -1248,8 +1128,13 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
         buf: &GuestPtr<'a, u8>,
         buf_len: types::Size,
     ) -> Result<(), Error> {
-        let mut buf = buf.as_array(buf_len).as_slice_mut()?;
-        self.random.try_fill_bytes(buf.deref_mut())?;
+        let mut buf = buf
+            .as_array(buf_len)
+            .as_slice_mut()
+            .map_err(crate::Error::from)?;
+        self.random
+            .try_fill_bytes(buf.deref_mut())
+            .map_err(crate::Error::from)?;
         Ok(())
     }
 
@@ -1292,7 +1177,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
                 let iov: types::Iovec = iov_ptr.read()?;
                 Ok(iov.buf.as_array(iov.buf_len).as_slice_mut()?)
             })
-            .collect::<Result<_, Error>>()?;
+            .collect::<Result<_, crate::Error>>()?;
 
         let mut ioslices: Vec<IoSliceMut> = guest_slices
             .iter_mut()
@@ -1300,7 +1185,10 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
             .collect();
 
         let (bytes_read, roflags) = f.sock_recv(&mut ioslices, RiFlags::from(ri_flags)).await?;
-        Ok((types::Size::try_from(bytes_read)?, roflags.into()))
+        Ok((
+            types::Size::try_from(bytes_read).map_err(crate::Error::from)?,
+            roflags.into(),
+        ))
     }
 
     async fn sock_send<'a>(
@@ -1321,7 +1209,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
                 let iov: types::Ciovec = iov_ptr.read()?;
                 Ok(iov.buf.as_array(iov.buf_len).as_slice()?)
             })
-            .collect::<Result<_, Error>>()?;
+            .collect::<Result<_, types::Errno>>()?;
 
         let ioslices: Vec<IoSlice> = guest_slices
             .iter()
@@ -1329,7 +1217,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
             .collect();
         let bytes_written = f.sock_send(&ioslices, SiFlags::empty()).await?;
 
-        Ok(types::Size::try_from(bytes_written)?)
+        Ok(types::Size::try_from(bytes_written).map_err(types::Errno::from)?)
     }
 
     async fn sock_shutdown(&mut self, fd: types::Fd, how: types::Sdflags) -> Result<(), Error> {
@@ -1338,7 +1226,8 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx {
             .get_file_mut(u32::from(fd))?
             .get_cap_mut(FileCaps::FDSTAT_SET_FLAGS)?;
 
-        f.sock_shutdown(SdFlags::from(how)).await
+        f.sock_shutdown(SdFlags::from(how)).await?;
+        Ok(())
     }
 }
 
@@ -1706,7 +1595,12 @@ impl TryFrom<&ReaddirEntity> for types::Dirent {
     fn try_from(e: &ReaddirEntity) -> Result<types::Dirent, Error> {
         Ok(types::Dirent {
             d_ino: e.inode,
-            d_namlen: e.name.as_bytes().len().try_into()?,
+            d_namlen: e
+                .name
+                .as_bytes()
+                .len()
+                .try_into()
+                .map_err(types::Errno::from)?,
             d_type: types::Filetype::from(&e.filetype),
             d_next: e.next.into(),
         })
@@ -1764,7 +1658,7 @@ fn systimespec(
     now: bool,
 ) -> Result<Option<SystemTimeSpec>, Error> {
     if set && now {
-        Err(Error::invalid_argument())
+        Err(crate::Error::invalid_argument())?
     } else if set {
         Ok(Some(SystemTimeSpec::Absolute(
             SystemClock::UNIX_EPOCH + Duration::from_nanos(ts),

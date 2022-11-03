@@ -5,7 +5,7 @@ use crate::sched::{
 };
 use crate::snapshots::preview_1::types as snapshot1_types;
 use crate::snapshots::preview_1::wasi_snapshot_preview1::WasiSnapshotPreview1 as Snapshot1;
-use crate::{Error, ErrorExt, WasiCtx};
+use crate::WasiCtx;
 use anyhow::Result;
 use cap_std::time::Duration;
 use std::collections::HashSet;
@@ -15,9 +15,11 @@ use std::ops::Deref;
 use tracing::debug;
 use wiggle::GuestPtr;
 
+type Error = wiggle::Error<types::Errno>;
+
 wiggle::from_witx!({
     witx: ["$WASI_ROOT/phases/old/snapshot_0/witx/wasi_unstable.witx"],
-    errors: { errno => Error },
+    errors: { errno },
     async: *,
     wasmtime: false,
 });
@@ -28,6 +30,7 @@ impl wiggle::GuestErrorType for types::Errno {
     }
 }
 
+/*
 impl types::UserErrorConversion for WasiCtx {
     fn errno_from_error(&mut self, e: Error) -> wiggle::Error<types::Errno> {
         debug!("Error: {:?}", e);
@@ -37,6 +40,7 @@ impl types::UserErrorConversion for WasiCtx {
         }
     }
 }
+*/
 
 /// FIXME: We can get rid of this once the WasiFile/WasiDir trait methods are in terms of wiggle::Error<types::Errno>
 impl TryFrom<Error> for types::Errno {

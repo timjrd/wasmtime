@@ -1,4 +1,4 @@
-use crate::{Error, ErrorExt};
+use crate::snapshots::preview_1::types::Errno;
 use wiggle::GuestPtr;
 
 pub struct StringArray {
@@ -49,7 +49,7 @@ impl StringArray {
         &self,
         buffer: &GuestPtr<'a, u8>,
         element_heads: &GuestPtr<'a, GuestPtr<'a, u8>>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Errno> {
         let element_heads = element_heads.as_array(self.number_elements());
         let buffer = buffer.as_array(self.cumulative_size());
         let mut cursor = 0;
@@ -59,13 +59,10 @@ impl StringArray {
             {
                 let elem_buffer = buffer
                     .get_range(cursor..(cursor + len))
-                    .ok_or(Error::invalid_argument())?; // Elements don't fit in buffer provided
+                    .ok_or(Errno::Inval)?; // Elements don't fit in buffer provided
                 elem_buffer.copy_from_slice(bytes)?;
             }
-            buffer
-                .get(cursor + len)
-                .ok_or(Error::invalid_argument())?
-                .write(0)?; // 0 terminate
+            buffer.get(cursor + len).ok_or(Errno::Inval)?.write(0)?; // 0 terminate
             head?.write(buffer.get(cursor).expect("already validated"))?;
             cursor += len + 1;
         }

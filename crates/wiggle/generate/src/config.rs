@@ -256,11 +256,11 @@ impl Parse for Literal {
 }
 
 #[derive(Clone, Default, Debug)]
-/// Map from abi error type to rich error type
-pub struct ErrorConf(HashMap<Ident, ErrorConfField>);
+/// All abi error types that need special error treatment
+pub struct ErrorConf(Vec<Ident>);
 
 impl ErrorConf {
-    pub fn iter(&self) -> impl Iterator<Item = (&Ident, &ErrorConfField)> {
+    pub fn iter(&self) -> impl Iterator<Item = &Ident> {
         self.0.iter()
     }
 }
@@ -269,55 +269,8 @@ impl Parse for ErrorConf {
     fn parse(input: ParseStream) -> Result<Self> {
         let content;
         let _ = braced!(content in input);
-        let items: Punctuated<ErrorConfField, Token![,]> =
-            content.parse_terminated(Parse::parse)?;
-        let mut m = HashMap::new();
-        for i in items {
-            match m.insert(i.abi_error.clone(), i.clone()) {
-                None => {}
-                Some(prev_def) => {
-                    return Err(Error::new(
-                        i.err_loc,
-                        format!(
-                        "duplicate definition of rich error type for {:?}: previously defined at {:?}",
-                        i.abi_error, prev_def.err_loc,
-                    ),
-                    ))
-                }
-            }
-        }
-        Ok(ErrorConf(m))
-    }
-}
-
-#[derive(Clone)]
-pub struct ErrorConfField {
-    pub abi_error: Ident,
-    pub rich_error: syn::Path,
-    pub err_loc: Span,
-}
-
-impl std::fmt::Debug for ErrorConfField {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ErrorConfField")
-            .field("abi_error", &self.abi_error)
-            .field("rich_error", &"(...)")
-            .field("err_loc", &self.err_loc)
-            .finish()
-    }
-}
-
-impl Parse for ErrorConfField {
-    fn parse(input: ParseStream) -> Result<Self> {
-        let err_loc = input.span();
-        let abi_error = input.parse::<Ident>()?;
-        let _arrow: Token![=>] = input.parse()?;
-        let rich_error = input.parse::<syn::Path>()?;
-        Ok(ErrorConfField {
-            abi_error,
-            rich_error,
-            err_loc,
-        })
+        let items: Punctuated<Ident, Token![,]> = content.parse_terminated(Parse::parse)?;
+        Ok(ErrorConf(items.into_iter().collect()))
     }
 }
 

@@ -14,26 +14,6 @@ pub fn define_func(
     func: &witx::InterfaceFunc,
     settings: &CodegenSettings,
 ) -> TokenStream {
-    let (ts, _bounds) = _define_func(names, module, func, settings);
-    ts
-}
-
-pub fn func_bounds(
-    names: &Names,
-    module: &witx::Module,
-    func: &witx::InterfaceFunc,
-    settings: &CodegenSettings,
-) -> Vec<Ident> {
-    let (_ts, bounds) = _define_func(names, module, func, settings);
-    bounds
-}
-
-fn _define_func(
-    names: &Names,
-    module: &witx::Module,
-    func: &witx::InterfaceFunc,
-    settings: &CodegenSettings,
-) -> (TokenStream, Vec<Ident>) {
     let rt = names.runtime_mod();
     let ident = names.func(&func.name);
 
@@ -56,7 +36,7 @@ fn _define_func(
     };
 
     let mut body = TokenStream::new();
-    let mut bounds = vec![names.trait_name(&module.name)];
+    let trait_bound = names.trait_name(&module.name);
     func.call_interface(
         &module.name,
         &mut Rust {
@@ -69,7 +49,6 @@ fn _define_func(
             module,
             funcname: func.name.as_str(),
             settings,
-            bounds: &mut bounds,
         },
     );
 
@@ -94,19 +73,16 @@ fn _define_func(
         } else {
             quote!(#body)
         };
-        (
-            quote!(
-                #[allow(unreachable_code)] // deals with warnings in noreturn functions
-                pub fn #ident(
-                    ctx: &mut (impl #(#bounds)+*),
-                    memory: &dyn #rt::GuestMemory,
-                    #(#abi_params),*
-                ) -> #rt::anyhow::Result<#abi_ret> {
-                    use std::convert::TryFrom as _;
-                    #traced_body
-                }
-            ),
-            bounds,
+        quote!(
+            #[allow(unreachable_code)] // deals with warnings in noreturn functions
+            pub fn #ident(
+                ctx: &mut impl #trait_bound,
+                memory: &dyn #rt::GuestMemory,
+                #(#abi_params),*
+            ) -> #rt::anyhow::Result<#abi_ret> {
+                use std::convert::TryFrom as _;
+                #traced_body
+            }
         )
     } else {
         let traced_body = if settings.tracing {
@@ -120,19 +96,16 @@ fn _define_func(
         } else {
             quote!(#body)
         };
-        (
-            quote!(
-                #[allow(unreachable_code)] // deals with warnings in noreturn functions
-                pub fn #ident<'a>(
-                    ctx: &'a mut (impl #(#bounds)+*),
-                    memory: &'a dyn #rt::GuestMemory,
-                    #(#abi_params),*
-                ) -> impl std::future::Future<Output = #rt::anyhow::Result<#abi_ret>> + 'a {
-                    use std::convert::TryFrom as _;
-                    #traced_body
-                }
-            ),
-            bounds,
+        quote!(
+            #[allow(unreachable_code)] // deals with warnings in noreturn functions
+            pub fn #ident<'a>(
+                ctx: &'a mut impl #trait_bound,
+                memory: &'a dyn #rt::GuestMemory,
+                #(#abi_params),*
+            ) -> impl std::future::Future<Output = #rt::anyhow::Result<#abi_ret>> + 'a {
+                use std::convert::TryFrom as _;
+                #traced_body
+            }
         )
     }
 }
@@ -147,15 +120,6 @@ struct Rust<'a> {
     module: &'a witx::Module,
     funcname: &'a str,
     settings: &'a CodegenSettings,
-    bounds: &'a mut Vec<Ident>,
-}
-
-impl Rust<'_> {
-    fn bound(&mut self, i: Ident) {
-        if !self.bounds.contains(&i) {
-            self.bounds.push(i);
-        }
-    }
 }
 
 impl witx::Bindgen for Rust<'_> {
@@ -298,15 +262,11 @@ impl witx::Bindgen for Rust<'_> {
             // enum, and *then* we lower to an i32.
             Instruction::EnumLower { ty } => {
                 let val = operands.pop().unwrap();
-                let val = match self.settings.errors.for_name(ty) {
-                    Some(custom) => {
-                        let method = self.names.user_error_conversion_method(&custom);
-                        self.bound(quote::format_ident!("UserErrorConversion"));
-                        quote!(UserErrorConversion::#method(ctx, #val).downcast()?)
-                    }
-                    None => val,
-                };
-                results.push(quote!(#val as i32));
+                results.push(if self.settings.errors.for_name(ty) {
+                    quote!(#val.downcast()? as i32)
+                } else {
+                    quote!(#val as i32)
+                });
             }
 
             Instruction::ResultLower { err: err_ty, .. } => {

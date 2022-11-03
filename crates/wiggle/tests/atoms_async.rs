@@ -13,7 +13,7 @@ wiggle::from_witx!({
 impl_errno!(types::Errno);
 
 #[wiggle::async_trait]
-impl<'a> atoms::Atoms for WasiCtx<'a> {
+impl atoms::Atoms for WasiCtx {
     async fn int_float_args(&mut self, an_int: u32, an_float: f32) -> Result<(), types::Errno> {
         println!("INT FLOAT ARGS: {} {}", an_int, an_float);
         Ok(())

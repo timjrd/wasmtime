@@ -1,4 +1,4 @@
-use crate::{Error, ErrorExt};
+use crate::Error;
 use std::any::Any;
 use std::collections::HashMap;
 
@@ -33,7 +33,7 @@ impl Table {
         // NOTE: The performance of this new key calculation could be very bad once keys wrap
         // around.
         if self.map.len() == u32::MAX as usize {
-            return Err(Error::trap("table has no free keys"));
+            return Err(Error::trap(anyhow::Error::msg("table has no free keys")));
         }
         loop {
             let key = self.next_key;
@@ -66,10 +66,9 @@ impl Table {
     /// results in a trapping error.
     pub fn get<T: Any + Sized>(&self, key: u32) -> Result<&T, Error> {
         if let Some(r) = self.map.get(&key) {
-            r.downcast_ref::<T>()
-                .ok_or_else(|| Error::badf().context("element is a different type"))
+            r.downcast_ref::<T>().ok_or_else(|| Error::badf())
         } else {
-            Err(Error::badf().context("key not in table"))
+            Err(Error::badf())
         }
     }
 
@@ -77,10 +76,9 @@ impl Table {
     /// reference can be borrowed at any given time. Borrow failure results in a trapping error.
     pub fn get_mut<T: Any + Sized>(&mut self, key: u32) -> Result<&mut T, Error> {
         if let Some(r) = self.map.get_mut(&key) {
-            r.downcast_mut::<T>()
-                .ok_or_else(|| Error::badf().context("element is a different type"))
+            r.downcast_mut::<T>().ok_or_else(|| Error::badf())
         } else {
-            Err(Error::badf().context("key not in table"))
+            Err(Error::badf())
         }
     }
 

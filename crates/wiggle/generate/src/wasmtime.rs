@@ -1,9 +1,7 @@
 use crate::config::Asyncness;
-use crate::funcs::func_bounds;
 use crate::{CodegenSettings, Names};
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::{format_ident, quote};
-use std::collections::HashSet;
 
 pub fn link_module(
     module: &witx::Module,
@@ -20,24 +18,16 @@ pub fn link_module(
     };
 
     let mut bodies = Vec::new();
-    let mut bounds = HashSet::new();
+    let trait_bound = names.trait_name(&module.name);
     for f in module.funcs() {
         let asyncness = settings.async_.get(module.name.as_str(), f.name.as_str());
         bodies.push(generate_func(&module, &f, names, target_path, asyncness));
-        let bound = func_bounds(names, module, &f, settings);
-        for b in bound {
-            bounds.insert(b);
-        }
     }
 
     let ctx_bound = if let Some(target_path) = target_path {
-        let bounds = bounds
-            .into_iter()
-            .map(|b| quote!(#target_path::#module_ident::#b));
-        quote!( #(#bounds)+* #send_bound )
+        quote!( #target_path::#module_ident::#trait_bound #send_bound )
     } else {
-        let bounds = bounds.into_iter();
-        quote!( #(#bounds)+* #send_bound )
+        quote!( #trait_bound #send_bound )
     };
 
     let func_name = if target_path.is_none() {

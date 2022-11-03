@@ -4,7 +4,6 @@ use crate::file::{FileCaps, FileEntry, WasiFile};
 use crate::sched::WasiSched;
 use crate::string_array::{StringArray, StringArrayError};
 use crate::table::Table;
-use crate::Error;
 use cap_rand::RngCore;
 use std::path::{Path, PathBuf};
 
@@ -43,7 +42,11 @@ impl WasiCtx {
             .insert_at(fd, Box::new(FileEntry::new(caps, file)));
     }
 
-    pub fn push_file(&mut self, file: Box<dyn WasiFile>, caps: FileCaps) -> Result<u32, Error> {
+    pub fn push_file(
+        &mut self,
+        file: Box<dyn WasiFile>,
+        caps: FileCaps,
+    ) -> Result<u32, anyhow::Error> {
         self.table().push(Box::new(FileEntry::new(caps, file)))
     }
 
@@ -67,7 +70,7 @@ impl WasiCtx {
         caps: DirCaps,
         file_caps: FileCaps,
         path: PathBuf,
-    ) -> Result<u32, Error> {
+    ) -> Result<u32, anyhow::Error> {
         self.table()
             .push(Box::new(DirEntry::new(caps, file_caps, Some(path), dir)))
     }
@@ -117,7 +120,7 @@ impl WasiCtx {
         &mut self,
         dir: Box<dyn WasiDir>,
         path: impl AsRef<Path>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), anyhow::Error> {
         let caps = DirCaps::all();
         let file_caps = FileCaps::all();
         self.table().push(Box::new(DirEntry::new(

@@ -8,11 +8,10 @@ mod types;
 pub mod wasmtime;
 
 use heck::ToShoutySnakeCase;
-use lifetimes::anon_lifetime;
 use proc_macro2::{Literal, TokenStream};
 use quote::quote;
 
-pub use codegen_settings::{CodegenSettings, UserErrorType};
+pub use codegen_settings::CodegenSettings;
 pub use config::{Config, WasmtimeConfig};
 pub use funcs::define_func;
 pub use module_trait::define_module_trait;
@@ -20,13 +19,9 @@ pub use names::Names;
 pub use types::define_datatype;
 
 pub fn generate(doc: &witx::Document, names: &Names, settings: &CodegenSettings) -> TokenStream {
-    // TODO at some point config should grow more ability to configure name
-    // overrides.
-    let rt = names.runtime_mod();
-
     let types = doc.typenames().map(|t| define_datatype(&names, &t));
     let error_types = settings.errors.iter().map(|errtype| {
-        let abi_typename = names.type_ref(&errtype.abi_type(), anon_lifetime());
+        let abi_typename = names.type_(&errtype.name);
         quote! {
             impl std::fmt::Display for #abi_typename {
                 fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -34,6 +29,12 @@ pub fn generate(doc: &witx::Document, names: &Names, settings: &CodegenSettings)
                 }
             }
             impl std::error::Error for #abi_typename {}
+
+            impl From<#abi_typename> for wiggle::Error<#abi_typename> {
+                fn from(t: #abi_typename) -> wiggle::Error<#abi_typename> {
+                    wiggle::Error::new(t)
+                }
+            }
         }
     });
 
@@ -50,17 +51,6 @@ pub fn generate(doc: &witx::Document, names: &Names, settings: &CodegenSettings)
         }
     });
 
-    let user_error_methods = settings.errors.iter().map(|errtype| {
-        let abi_typename = names.type_ref(&errtype.abi_type(), anon_lifetime());
-        let user_typename = errtype.typename();
-        let methodname = names.user_error_conversion_method(&errtype);
-        quote!(fn #methodname(&mut self, e: super::#user_typename) -> #rt::Error<#abi_typename>;)
-    });
-    let user_error_conversion = quote! {
-        pub trait UserErrorConversion {
-            #(#user_error_methods)*
-        }
-    };
     let modules = doc.modules().map(|module| {
         let modname = names.module(&module.name);
         let fs = module
@@ -75,7 +65,6 @@ pub fn generate(doc: &witx::Document, names: &Names, settings: &CodegenSettings)
         quote!(
             pub mod #modname {
                 use super::types::*;
-                pub use super::types::UserErrorConversion;
                 #(#fs)*
 
                 #modtrait
@@ -92,7 +81,6 @@ pub fn generate(doc: &witx::Document, names: &Names, settings: &CodegenSettings)
             #(#types)*
             #(#error_types)*
             #(#constants)*
-            #user_error_conversion
         }
         #(#modules)*
     )
