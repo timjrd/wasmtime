@@ -367,6 +367,11 @@ impl HostOutputStream for AsyncWriteStream {
 
         Ok(())
     }
+
+    async fn flush_output(&mut self) {
+        // Worker task has flushed outputs when it is ready for writing again:
+        let _ = self.ready().await;
+    }
 }
 
 /// An output stream that consumes all input written to it, and is always ready.

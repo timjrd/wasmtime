@@ -2,11 +2,14 @@ use super::clocks::host::{monotonic_clock, wall_clock};
 use crate::preview2::{
     clocks::{self, HostMonotonicClock, HostWallClock},
     filesystem::{Dir, TableFsExt},
-    pipe, random, stdio,
+    pipe,
+    poll::TablePollableExt,
+    random, stdio,
     stream::{HostInputStream, HostOutputStream, TableStreamExt},
     DirPerms, FilePerms, Table,
 };
 use cap_rand::{Rng, RngCore, SeedableRng};
+use std::future::Future;
 use std::mem;
 
 pub struct WasiCtxBuilder {
@@ -257,4 +260,56 @@ pub struct WasiCtx {
     pub(crate) stdin: u32,
     pub(crate) stdout: u32,
     pub(crate) stderr: u32,
+}
+
+impl WasiCtx {
+    /// Special destructor method which flushes all pending stream outputs.
+    /// Use this after WebAssembly execution is complete, but before dropping the Table,
+    /// which will abort all worker tasks (perhaps before they can flush).
+    /// This will remove all HostOutputStreams and HostPollable resources from the table.
+    pub fn flush_output<'a>(self, table: &'a mut Table) -> impl Future<Output = ()> {
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+        let keys = table.keys().map(|ix| *ix).collect::<Vec<u32>>();
+        let mut set = Vec::new();
+        // we can't remove an ostream from the table if it has any child pollables,
+        // so first delete all of those from the table.
+        for k in keys.iter() {
+            let _ = table.delete_host_pollable(*k);
+        }
+        for k in keys {
+            match table.delete_output_stream(k) {
+                Ok(mut ostream) => {
+                    // async block takes ownership of the ostream and flushes it
+                    let f = async move { ostream.flush_output().await };
+                    set.push(Box::pin(f) as _)
+                }
+                _ => {}
+            }
+        }
+        // poll futures until all are ready.
+        // this may be possible with something from `futures` but i couldn't figure it out
+        struct JoinAll(Vec<Pin<Box<dyn Future<Output = ()> + Send>>>);
+        impl Future for JoinAll {
+            type Output = ();
+            fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+                // Iterate through the set, polling each future and removing it from the set if it
+                // is ready:
+                self.as_mut()
+                    .0
+                    .retain_mut(|fut| match fut.as_mut().poll(cx) {
+                        Poll::Ready(_) => false,
+                        _ => true,
+                    });
+                // Ready if set is empty:
+                if self.as_mut().0.is_empty() {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            }
+        }
+
+        JoinAll(set)
+    }
 }

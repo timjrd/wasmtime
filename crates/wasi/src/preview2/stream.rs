@@ -88,6 +88,27 @@ pub trait HostOutputStream: Send + Sync {
     /// Check for write readiness: this method blocks until the stream is
     /// ready for writing.
     async fn ready(&mut self) -> Result<(), Error>;
+
+    /// Flush any output which has been buffered. Exposed only to the host, not accessible from
+    /// WebAssembly.
+    async fn flush_output(&mut self) {}
+}
+
+impl<'a> TryFrom<crate::preview2::OccupiedEntry<'a>> for Box<dyn HostOutputStream> {
+    type Error = TableError;
+    fn try_from(
+        e: crate::preview2::OccupiedEntry<'a>,
+    ) -> Result<Box<dyn HostOutputStream>, TableError> {
+        match e.get().downcast_ref() {
+            Some(InternalOutputStream::Host(_)) => {
+                match *e.remove_entry().unwrap().downcast().unwrap() {
+                    InternalOutputStream::Host(h) => Ok(h),
+                    _ => unreachable!(),
+                }
+            }
+            _ => Err(TableError::WrongType),
+        }
+    }
 }
 
 pub(crate) enum InternalInputStream {
